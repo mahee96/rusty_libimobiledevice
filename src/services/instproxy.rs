@@ -1,10 +1,11 @@
 // jkcoxson
 
 use std::ffi::CString;
+use std::sync::mpsc::{channel, Sender};
 
 use crate::{bindings as unsafe_bindings, error::InstProxyError, idevice::Device};
 
-use log::info;
+use log::{error, info};
 use plist_plus::Plist;
 
 /// Manages installing, removing and modifying applications on the device
@@ -191,7 +192,45 @@ impl InstProxyClient<'_> {
         &self,
         pkg_path: impl Into<String>,
         client_options: Option<Plist>,
-    ) -> Result<(), InstProxyError> {
+    ) -> Result<(), (InstProxyError, String)> {
+        unsafe extern "C" fn install_cb_helper(
+            _command: unsafe_bindings::plist_t,
+            status: unsafe_bindings::plist_t,
+            user_data: *mut ::std::os::raw::c_void,
+        ) {
+            let status: plist::Dictionary = crate::libplist_to_rusty_plist(status);
+
+            let tx = Box::from_raw(user_data as *mut Sender<(InstProxyError, String)>);
+            // We're ignoring completion percentage.
+            if let Some(status) = status.get("Status").and_then(|s| s.as_string()) {
+                if status == "Complete" {
+                    info!("Instproxy install: success");
+                    tx.send((InstProxyError::Success, "".to_string())).expect(
+                        "Installation success cannot be transmitted. This shouldn't happen.",
+                    );
+                }
+            } else {
+                // An error happened!!
+                let error = status
+                    .get("Error")
+                    .and_then(|err| err.as_string())
+                    .unwrap_or("Unknown error");
+                let description = status
+                    .get("ErrorDescription")
+                    .and_then(|err| err.as_string())
+                    .unwrap_or("No further description");
+                let detail = (status
+                    .get("ErrorDetail")
+                    .and_then(|err| err.as_unsigned_integer())
+                    .unwrap_or(u64::MAX) as i32)
+                    .into();
+                error!("Instproxy install: {detail:?} ({error}): {description}");
+                tx.send((detail, description.to_owned()))
+                    .expect("Installation error cannot be transmitted. This shouldn't happen.");
+            }
+            std::mem::forget(tx); // make sure it is not dropped so that it is still valid for consecutive callback calls
+        }
+
         info!("Instproxy install");
         let pkg_path_c_str = std::ffi::CString::new(pkg_path.into()).unwrap();
 
@@ -201,18 +240,25 @@ impl InstProxyClient<'_> {
             std::ptr::null_mut()
         };
 
-        let result = unsafe {
+        let (tx, rx) = channel();
+
+        let tx_box = Box::into_raw(Box::new(tx));
+
+        unsafe {
             unsafe_bindings::instproxy_install(
                 self.pointer,
                 pkg_path_c_str.as_ptr(),
                 ptr,
-                None, // I feel like this will segfault. The bindings are probably wrong.
-                std::ptr::null_mut(),
+                Some(install_cb_helper),
+                tx_box as *mut _,
             )
-        }
-        .into();
+        };
+        let (result, description) = rx
+            .recv()
+            .expect("Installation status cannot be retrieved. This shouldn't happen.");
+        let _ = unsafe { Box::from_raw(tx_box) }; // reclaim and drop
         if result != InstProxyError::Success {
-            return Err(result);
+            return Err((result, description));
         }
 
         Ok(())

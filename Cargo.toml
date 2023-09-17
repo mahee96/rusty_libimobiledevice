@@ -18,6 +18,8 @@ libc = "0.2.14"
 plist_plus = { version = "0.2.*" }
 openssl = { version = "0.10.38", optional = true }
 log = "0.4.15"
+plist = "1.5.0"
+serde = "1.0.188"
 
 [build-dependencies]
 bindgen = "0.59.2"
@@ -30,7 +32,4 @@ default = ["openssl"]
 pls-generate = []
 dynamic = ["plist_plus/dynamic"]
 static = ["plist_plus/static"]
-vendored = [
-    "plist_plus/vendored",
-    "openssl/vendored"
-]
+vendored = ["plist_plus/vendored", "openssl/vendored"]
